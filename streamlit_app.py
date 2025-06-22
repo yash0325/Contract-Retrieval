@@ -1,7 +1,6 @@
 import streamlit as st
-import os
 
-# For secrets management (OpenAI key)
+# Load OpenAI API key from Streamlit secrets
 openai_api_key = st.secrets["OPENAI_API_KEY"]
 
 from langchain_community.document_loaders import TextLoader
@@ -11,62 +10,43 @@ from langchain_community.vectorstores import FAISS
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 
-# UI setup
-st.set_page_config(page_title="Contract Retrieval Debug", layout="centered")
-st.title("🛠️ Contract Retrieval & Clause Summarization (with Debugging)")
+st.set_page_config(page_title="Contract Retrieval AI", layout="centered")
+st.title("🤖 Contract Retrieval & Clause Summarization App")
 
-uploaded_file = st.file_uploader("Upload your contract as a markdown (.md) file", type=["md"])
-
-# Initialize results dictionary for debugging
-debug_results = {}
+uploaded_file = st.file_uploader(
+    "Upload your contract as a markdown (.md) file", type=["md"]
+)
 
 if uploaded_file is not None:
-    # Save uploaded file
+    # Save uploaded file to a fixed location
     file_path = "uploaded_contract.md"
     with open(file_path, "wb") as f:
         f.write(uploaded_file.read())
     st.success("Contract uploaded successfully!")
 
-    # 1. Load document
-    try:
-        loader = TextLoader(file_path, autodetect_encoding=True)
-        docs = loader.load()
-        debug_results['loaded_docs'] = [doc.page_content[:300] for doc in docs]  # Preview first 300 chars
-        st.info(f"✅ Document loaded. First 300 chars:\n{debug_results['loaded_docs'][0]}")
-    except Exception as e:
-        st.error(f"❌ Error loading document: {e}")
+    # 1. Load and split the contract
+    loader = TextLoader(file_path, autodetect_encoding=True)
+    docs = loader.load()
+    splitter = MarkdownHeaderTextSplitter(
+        headers_to_split_on=[
+            ("#", "Header 1"),
+            ("##", "Header 2"),
+            ("###", "Header 3"),
+        ]
+    )
+    split_docs = []
+    for doc in docs:
+        split_docs.extend(splitter.split_text(doc.page_content))
 
-    # 2. Split by markdown headers
-    try:
-        splitter = MarkdownHeaderTextSplitter(
-            headers_to_split_on=[
-                ("#", "Header 1"),
-                ("##", "Header 2"),
-                ("###", "Header 3"),
-            ]
-        )
-        split_docs = []
-        for doc in docs:
-            split_docs.extend(splitter.split_text(doc.page_content))
-        debug_results['split_docs'] = [doc.page_content[:300] for doc in split_docs]  # First 300 chars of each chunk
-        st.info(f"✅ Document split. Example split section:\n{debug_results['split_docs'][0]}")
-        st.write("Total split sections:", len(split_docs))
-    except Exception as e:
-        st.error(f"❌ Error splitting document: {e}")
+    # 2. Create embeddings and vectorstore
+    embeddings = OpenAIEmbeddings(
+        model="text-embedding-ada-002",
+        openai_api_key=openai_api_key
+    )
+    vectorstore = FAISS.from_documents(split_docs, embeddings)
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
-    # 3. Embed & index
-    try:
-        embeddings = OpenAIEmbeddings(
-            model="text-embedding-ada-002",
-            openai_api_key=openai_api_key
-        )
-        vectorstore = FAISS.from_documents(split_docs, embeddings)
-        retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-        st.success("✅ Embeddings and vectorstore created successfully.")
-    except Exception as e:
-        st.error(f"❌ Error during embedding/indexing: {e}")
-
-    # 4. Define agent prompts & chains
+    # 3. Define prompts and LLM chains
     retrieval_prompt = """As a Retrieval agent, your task is to thoroughly investigate the uploaded knowledge base using semantic search.
     Focus on identifying sections and clauses most relevant to the user’s question.
     Do not include loosely related or redundant information. Avoid assumptions or extrapolation.
@@ -116,55 +96,49 @@ if uploaded_file is not None:
         prompt=PromptTemplate(input_variables=["query", "extracted_clauses"], template=summarizer_prompt)
     )
 
+    # 4. Define main pipeline function
     def contract_query_pipeline(user_query: str):
-        # Step 1: Retrieval agent
+        # Step 1: Retrieve relevant docs
         docs = retriever.get_relevant_documents(user_query)
         retrieved_excerpts = "\n\n".join([doc.page_content for doc in docs])
-        st.info(f"🔎 Retriever found {len(docs)} sections. Example excerpt:\n{retrieved_excerpts[:300]}")
-        debug_results['retrieved_excerpts'] = retrieved_excerpts
 
-        # Step 2: Retrieval chain (LLM)
+        # Step 2: LLM chains
+        # (Note: we're only showing the *raw retrieved excerpts* in the UI)
         retrieval_output = retrieval_chain.run(query=user_query)
-        st.info("Retrieval agent LLM output (first 500 chars):")
-        st.code(retrieval_output[:500])
-        debug_results['retrieval_output'] = retrieval_output
-
-        # Step 3: Clause extractor agent (LLM)
         clause_extractor_output = clause_extractor_chain.run(
             query=user_query,
             retrieved_excerpts=retrieved_excerpts
         )
-        st.info("Clause extractor LLM output (first 500 chars):")
-        st.code(clause_extractor_output[:500])
-        debug_results['clause_extractor_output'] = clause_extractor_output
-
-        # Step 4: Summarizer agent (LLM)
         summary = summarizer_chain.run(
             query=user_query,
             extracted_clauses=clause_extractor_output
         )
-        st.info("Summarizer LLM output (first 500 chars):")
-        st.code(summary[:500])
-        debug_results['summary'] = summary
-
         return {
-            "retrieved_excerpts": retrieval_output,
+            "retrieved_excerpts_raw": retrieved_excerpts,
+            "retrieval_output": retrieval_output,  # Agent LLM output (optional to show)
             "extracted_clauses": clause_extractor_output,
             "summary": summary
         }
 
-    # 5. User input and trigger pipeline
+    # 5. User input and results
     st.header("Ask a Question About Your Contract")
     user_query = st.text_input("Enter your contract/legal question:", "")
 
     if st.button("Submit") and user_query:
-        with st.spinner("Processing with AI agents..."):
+        with st.spinner("Processing your request..."):
             results = contract_query_pipeline(user_query)
 
+        # --- MAIN UI OUTPUTS ---
         st.markdown("## 🔍 Retrieved Excerpts")
-        st.write(results["retrieved_excerpts"])
+        st.write(results["retrieved_excerpts_raw"])  # <-- Now shows actual contract excerpts
+
+        # Optional: If you want to see the LLM synthesis of the retrieval step
+        # st.markdown("### Retrieval Agent LLM Output")
+        # st.write(results["retrieval_output"])
+
         st.markdown("## 📑 Extracted Clauses")
         st.write(results["extracted_clauses"])
+
         st.markdown("## 📝 Final Summary")
         st.success(results["summary"])
 else:
