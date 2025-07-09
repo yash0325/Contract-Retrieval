@@ -11,6 +11,7 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
+from langchain.schema import HumanMessage
 
 # ---- UI Layout & Branding ----
 st.set_page_config(page_title="Contract Retriever AI", layout="wide")
@@ -275,7 +276,8 @@ Contract excerpt:
 User question:
 {user_query}
 """
-            direct_gpt_output = llm(direct_prompt)
+            # FIX: Use HumanMessage as required by langchain-openai ChatOpenAI
+            direct_gpt_output = llm([HumanMessage(content=direct_prompt)]).content
 
             # Run judge agent to compare outputs
             judge_output = judge_chain.run(
